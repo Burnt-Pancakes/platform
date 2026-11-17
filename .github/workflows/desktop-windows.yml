@@ -1,0 +1,99 @@
+# Manual, unsigned Windows x64 build of the Huly desktop app.
+# Draft: derived from the upstream dist-build job in main.yml and not yet run.
+# It never publishes anything and uses no secrets.
+name: Desktop build (Windows, unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Version tag the build scripts read (for example v0.7.426)'
+        required: true
+        default: 'v0.7.426'
+      update_url:
+        description: 'Auto-update base URL baked into the app instead of https://dist.huly.io. The .invalid default never resolves, so the app will not contact the dead host.'
+        required: true
+        default: 'https://updates.invalid'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    # Upstream cross-builds the Windows installer on a macOS runner, so this does too.
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: tree:0
+          submodules: recursive
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Cache node modules
+        uses: actions/cache@v6
+        env:
+          cache-name: node
+        with:
+          path: |
+            common/temp
+          key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ env.cache-name }}-
+
+      - name: Create local version tag
+        env:
+          VERSION_TAG: ${{ inputs.version_tag }}
+        run: |
+          # The version scripts read the git tag. Tag locally only; nothing is pushed.
+          [[ "$VERSION_TAG" =~ ^[vs][0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version_tag must look like v0.7.426"; exit 1; }
+          git tag -f "$VERSION_TAG"
+
+      - name: Replace the dead update host
+        env:
+          UPDATE_URL: ${{ inputs.update_url }}
+        run: |
+          [[ "$UPDATE_URL" =~ ^https?://[A-Za-z0-9./:_-]+$ ]] || { echo "update_url is not a plain URL"; exit 1; }
+          # Packaging config and the built-in fallback in the main process.
+          sed -i.bak "s|https://dist.huly.io|${UPDATE_URL}|g" desktop-package/package.json desktop/src/main/start.ts
+          rm -f desktop-package/package.json.bak desktop/src/main/start.ts.bak
+          echo "Remaining references to the old host:"
+          grep -rn "dist.huly.io" desktop-package/package.json desktop/src/main/start.ts || echo "none"
+
+      - name: Installing...
+        run: node common/scripts/install-run-rush.js install --purge
+
+      - name: Model version from git tags
+        run: node common/scripts/install-run-rush.js model-version
+
+      - name: Package
+        run: node common/scripts/install-run-rush.js package --to desktop -v
+
+      - name: Bump package JSON version
+        run: |
+          cd desktop-package
+          node ../common/scripts/install-run-rushx.js bump
+          grep -n '"version"' ./package.json
+
+      - name: Build Windows x64 (no signing, no publishing)
+        run: |
+          cd desktop-package
+          node ../common/scripts/install-run-rushx.js dist-local --windows --x64
+          ls -la deploy
+
+      - name: Upload installer and zip
+        uses: actions/upload-artifact@v6
+        with:
+          name: Huly-Windows-x64
+          path: |
+            desktop-package/deploy/Huly-windows-*
+            desktop-package/deploy/*.yml
+          if-no-files-found: error
